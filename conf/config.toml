@@ -1,0 +1,15 @@
+# current server on port ， it port can not to mapping any host
+port = 9567
+
+#  authentication https suffixes, the fomart is http://host:port/{authentication}
+authentication = "dmz_locker_demo?hello=world&hello2=world2"
+
+# mapping host port
+
+[[mappings]]
+port = 3389
+addr = "192.168.10.210:3389"
+
+[[mappings]]
+port = 22
+addr = "192.168.10.220:22"
