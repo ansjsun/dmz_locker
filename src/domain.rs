@@ -1,4 +1,10 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicU32, AtomicU64},
+        Arc,
+    },
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -15,12 +21,12 @@ pub struct Mapping {
     pub addr: String,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Clone, Serialize)]
 pub struct ClientInfo {
-    pub remote_addr: String,
+    pub remote_ip: String,
     pub port: u16,
-    pub count: u32,
-    pub last_time: u64,
+    pub count: Arc<AtomicU32>,
+    pub last_time: Arc<AtomicU64>,
 }
 
 impl Config {
@@ -46,7 +52,7 @@ impl Config {
         })?;
 
         //check mapping port is unique
-        let mut mapping_ports = self
+        let mapping_ports = self
             .mappings
             .iter()
             .map(|mapping| mapping.port)

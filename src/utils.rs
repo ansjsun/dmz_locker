@@ -13,7 +13,7 @@ pub(crate) fn http_parse(content: &str) -> HashMap<String, String> {
     //parse http header
     let mut headers = HashMap::new();
     let mut lines = content.lines();
-    let mut line = lines.next().unwrap();
+    let mut line = lines.next().unwrap_or_default();
     let mut method = "";
     let mut path = "";
     let mut version = "";

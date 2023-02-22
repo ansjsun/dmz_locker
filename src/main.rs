@@ -2,11 +2,11 @@ mod domain;
 mod server;
 mod utils;
 
-use std::{env::Args, net::TcpListener, sync::Arc, thread::JoinHandle};
+
 
 use domain::Config;
 use log::error;
-use serde::Deserialize;
+
 
 fn main() {
     env_logger::init();

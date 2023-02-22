@@ -2,7 +2,7 @@
 port = 9567
 
 #  authentication https suffixes, the fomart is http://host:port/{authentication}
-authentication = "dmz_locker_demo?hello=world&hello2=world2"
+authentication = "/dmz_locker_demo?hello=world&hello2=world2"
 
 # mapping host port
 

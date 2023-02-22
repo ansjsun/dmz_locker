@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
-    io::Read,
+    hash::Hash,
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex, RwLock},
+    sync::{atomic::Ordering, Arc, RwLock},
     thread::{spawn, JoinHandle},
     time::Duration,
     vec,
@@ -18,12 +19,11 @@ use crate::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[derive(Debug)]
 struct Server {
     servers: RwLock<Vec<JoinHandle<()>>>,
     conns: RwLock<HashMap<String, u64>>,
     white_list: RwLock<Cache<String, u64>>,
-    black_list: RwLock<Cache<String, RwLock<ClientInfo>>>,
+    black_list: RwLock<Cache<String, ClientInfo>>,
     errors: Vec<String>,
 }
 
@@ -46,15 +46,19 @@ pub fn start(conf: Config) -> Result<()> {
         errors: vec![],
     });
 
+    for mapping in conf.mappings {
+        server.start_listener(mapping.port, mapping.addr);
+    }
+
     if server.errors.len() > 0 {
         return Err(server.errors.join("\n").into());
     }
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", conf.port)).unwrap();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", conf.port)).unwrap();
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(e) = server.handle_inner(stream) {
+                if let Err(e) = server.handle_inner(&conf.authentication, stream, conf.port) {
                     error!("handle interal hs error: {}", e);
                 }
             }
@@ -65,9 +69,26 @@ pub fn start(conf: Config) -> Result<()> {
 }
 
 impl Server {
-    fn start_listener(self: &Arc<Self>, port: u16, target_addr: Option<String>) {
-        let server = self.clone();
-        self.servers.write().unwrap().push(spawn(move || {}));
+    fn start_listener(self: &Arc<Self>, port: u16, target_addr: String) {
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
+
+        self.servers.write().unwrap().push(spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        let server = self.clone();
+                        spawn(move || {
+                            if let Err(e) = server.handle_proxy(stream, &target_addr) {
+                                error!("stream for proxy server recive error: {:?}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("listener on proxy server recive error: {:?}", e);
+                    }
+                }
+            }
+        }));
     }
 }
 
@@ -76,58 +97,80 @@ impl Server {
         self: &Arc<Self>,
         authentication: &String,
         mut stream: TcpStream,
+        port: u16,
     ) -> Result<()> {
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
 
-        let remote_addr = stream.peer_addr()?.ip().to_string();
+        let remote_ip = stream.peer_addr()?.ip().to_string();
 
-        let mut buf = vec![0_u8; 1024];
+        let mut content = String::new();
+        let mut reader = BufReader::new(stream.try_clone()?);
 
-        let len = stream.read(&mut buf)?;
-        buf.resize(len, 0);
-
-        let content = String::from_utf8(buf)?;
+        reader.read_to_string(&mut content);
 
         let head = utils::http_parse(&content);
 
         if let Some(path) = head.get("path") {
             if authentication.eq(path) {
+                self.white_list
+                    .write()
+                    .unwrap()
+                    .insert(remote_ip, current_seconds());
             } else {
+                self.add_black_list(&remote_ip, port);
+                self.white_list.write().unwrap().invalidate(&remote_ip);
                 return Err(format!(
-                    "remote_addr:{:?} auth error , request path:{:?}",
-                    remote_addr, path
+                    "remote_ip:{:?} auth error , request path:{:?}",
+                    remote_ip, path
                 )
                 .into());
             }
         }
 
-        if head.get("path").unwrap() == "/proxy" {
-            let addr = head.get("addr").unwrap();
-            self.handle_proxy(stream, addr);
-        } else {
-            self.handle_inner(stream);
-        }
+        let white_list = self
+            .white_list
+            .read()
+            .unwrap()
+            .clone()
+            .iter()
+            .collect::<HashMap<_, _>>();
+        let black_list = self
+            .black_list
+            .read()
+            .unwrap()
+            .clone()
+            .iter()
+            .collect::<HashMap<_, _>>();
 
+        let value = serde_json::json!({
+            "white_list": white_list,
+            "black_list": black_list,
+        })
+        .to_string();
+
+        stream.write_all(value.as_bytes());
         Ok(())
     }
 
-    pub fn handle_proxy(self: &Arc<Self>, stream: TcpStream, addr: &String) {
+    pub fn handle_proxy(self: &Arc<Self>, _stream: TcpStream, _addr: &String) -> Result<()> {
         todo!()
     }
 
-    pub fn add_black_list(self: &Arc<Self>, remote_addr: String, port: u64) {
+    pub fn add_black_list(self: &Arc<Self>, remote_ip: &String, port: u16) {
         let entry = self
             .black_list
             .write()
             .unwrap()
-            .entry(format!("{}:{}", remote_addr, port))
-            .or_insert(RwLock::new(ClientInfo {
-                remote_addr,
-                port: port,
-                count: 0,
-                last_time: 0,
-            }));
+            .entry_by_ref(&format!("{}:{}", remote_ip, port))
+            .or_insert(ClientInfo {
+                remote_ip: remote_ip.clone(),
+                port,
+                count: Arc::new(Default::default()),
+                last_time: Arc::new(Default::default()),
+            });
 
-        entry.value();
+        let value = entry.value();
+        value.last_time.store(current_seconds(), Ordering::SeqCst);
+        value.count.fetch_add(1, Ordering::SeqCst);
     }
 }
