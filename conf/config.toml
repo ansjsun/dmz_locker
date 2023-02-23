@@ -7,6 +7,7 @@ authentication = "/dmz_locker_demo?hello=world&hello2=world2"
 # how invalidate time when authetication
 session_time_sec = 86400
 
+
 # mapping host port
 
 [[mappings]]
@@ -15,6 +16,6 @@ addr = "127.0.0.1:10000"
 is_public = true
 
 [[mappings]]
-port = 2222
-addr = "127.0.0.1:10000"
+port = 8888
+addr = "127.0.0.1:22"
 is_public = false

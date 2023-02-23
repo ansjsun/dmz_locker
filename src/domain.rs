@@ -54,7 +54,7 @@ impl Config {
         })?;
 
         //check mapping port is unique
-        let mapping_ports = self
+        let mut mapping_ports = self
             .mappings
             .iter()
             .map(|mapping| mapping.port)
@@ -63,7 +63,11 @@ impl Config {
         let unique = mapping_ports.iter().cloned().collect::<HashSet<u16>>();
 
         if unique.len() != mapping_ports.len() {
-            return Err("mapping port is not unique".to_string());
+            mapping_ports.sort();
+            return Err(format!(
+                "mapping port is not unique ports:{:?}",
+                mapping_ports
+            ));
         }
 
         Ok(())

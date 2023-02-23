@@ -33,6 +33,11 @@ fn main() {
 
     let config = toml::from_str::<Config>(&config_str).unwrap();
 
+    if let Err(e) = config.validate() {
+        error!("Error starting server: {}", e);
+        std::process::exit(1);
+    }
+
     if let Err(e) = server::start(config) {
         error!("Error starting server: {}", e);
         std::process::exit(1);

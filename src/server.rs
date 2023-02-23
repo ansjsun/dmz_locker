@@ -112,7 +112,7 @@ impl Server {
         let mut content = String::new();
         let mut reader = BufReader::new(stream.try_clone()?);
 
-        reader.read_to_string(&mut content);
+        reader.read_to_string(&mut content)?;
 
         let head = utils::http_parse(&content);
 
@@ -151,16 +151,19 @@ impl Server {
             .iter()
             .collect::<HashMap<_, _>>();
 
+        let conns = self.conns.read().unwrap().clone();
+
         let value = serde_json::json!({
             "white_list": white_list,
             "black_list": black_list,
+            "conns":conns,
         })
         .to_string();
 
         let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n";
-        stream.write(response);
-        stream.write(value.as_bytes());
-        stream.flush();
+        stream.write(response)?;
+        stream.write(value.as_bytes())?;
+        stream.flush()?;
         Ok(())
     }
 
@@ -169,9 +172,10 @@ impl Server {
         mut stream: TcpStream,
         mapping: Arc<Mapping>,
     ) -> Result<()> {
+        let peer = stream.peer_addr()?;
+        let remote_ip = peer.ip().to_string();
+        let remote_port = peer.port();
         if !mapping.is_public {
-            let remote_ip = stream.peer_addr()?.ip().to_string();
-
             if !self.white_list.read().unwrap().contains_key(&remote_ip) {
                 self.add_black_list(&remote_ip, mapping.port);
                 std::thread::sleep(Duration::from_secs(5));
@@ -186,12 +190,25 @@ impl Server {
         let mut stream_write = stream.try_clone()?;
         let mut target_read = target.try_clone()?;
 
-        spawn(move || {
+        let mut handles = Vec::with_capacity(2);
+        handles.push(spawn(move || {
             _ = std::io::copy(&mut stream, &mut target);
-        });
+        }));
 
-        spawn(move || {
+        handles.push(spawn(move || {
             _ = std::io::copy(&mut target_read, &mut stream_write);
+        }));
+
+        let key = format!("{}:{}", remote_ip, remote_port);
+        _ = spawn(move || {
+            self.conns
+                .write()
+                .unwrap()
+                .insert(key.clone(), current_seconds());
+            for h in handles {
+                _ = h.join();
+            }
+            self.conns.write().unwrap().remove(&key);
         });
 
         // if mapping.is_public{
