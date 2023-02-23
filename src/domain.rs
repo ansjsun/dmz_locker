@@ -13,12 +13,14 @@ pub struct Config {
     pub port: u16,
     pub authentication: String,
     pub mappings: Vec<Mapping>,
+    pub session_time_sec: u64,
 }
 
 #[derive(Default, Debug, Deserialize, Clone)]
 pub struct Mapping {
     pub port: u16,
     pub addr: String,
+    pub is_public: bool,
 }
 
 #[derive(Default, Debug, Clone, Serialize)]

@@ -4,12 +4,17 @@ port = 9567
 #  authentication https suffixes, the fomart is http://host:port/{authentication}
 authentication = "/dmz_locker_demo?hello=world&hello2=world2"
 
+# how invalidate time when authetication
+session_time_sec = 86400
+
 # mapping host port
 
 [[mappings]]
-port = 3389
-addr = "192.168.10.210:3389"
+port = 8888
+addr = "127.0.0.1:10000"
+is_public = true
 
 [[mappings]]
-port = 22
-addr = "192.168.10.220:22"
+port = 2222
+addr = "127.0.0.1:10000"
+is_public = false

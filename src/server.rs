@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    hash::Hash,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     sync::{atomic::Ordering, Arc, RwLock},
     thread::{spawn, JoinHandle},
@@ -9,11 +8,11 @@ use std::{
     vec,
 };
 
-use log::error;
+use log::{error, info};
 use moka::sync::Cache;
 
 use crate::{
-    domain::{ClientInfo, Config},
+    domain::{ClientInfo, Config, Mapping},
     utils::{self, current_seconds},
 };
 
@@ -33,7 +32,7 @@ pub fn start(conf: Config) -> Result<()> {
         conns: RwLock::new(Default::default()),
         white_list: RwLock::new(
             Cache::builder()
-                .time_to_idle(Duration::from_secs(60 * 60 * 120))
+                .time_to_idle(Duration::from_secs(conf.session_time_sec))
                 .max_capacity(1000)
                 .build(),
         ),
@@ -47,7 +46,7 @@ pub fn start(conf: Config) -> Result<()> {
     });
 
     for mapping in conf.mappings {
-        server.start_listener(mapping.port, mapping.addr);
+        server.start_listener(mapping)?;
     }
 
     if server.errors.len() > 0 {
@@ -69,16 +68,20 @@ pub fn start(conf: Config) -> Result<()> {
 }
 
 impl Server {
-    fn start_listener(self: &Arc<Self>, port: u16, target_addr: String) {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
-
+    fn start_listener(self: &Arc<Self>, mapping: Mapping) -> Result<()> {
+        info!("start proxy on :{:?} ", mapping);
+        let mapping = Arc::new(mapping);
+        let mp = mapping.clone();
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", mp.port))?;
+        let server = self.clone();
         self.servers.write().unwrap().push(spawn(move || {
             for stream in listener.incoming() {
                 match stream {
                     Ok(stream) => {
-                        let server = self.clone();
+                        let mp = mapping.clone();
+                        let server = server.clone();
                         spawn(move || {
-                            if let Err(e) = server.handle_proxy(stream, &target_addr) {
+                            if let Err(e) = server.handle_proxy(stream, mp) {
                                 error!("stream for proxy server recive error: {:?}", e);
                             }
                         });
@@ -88,7 +91,10 @@ impl Server {
                     }
                 }
             }
+            error!("server proxyed on mapping:{:?} shutdownd", mp);
         }));
+
+        Ok(())
     }
 }
 
@@ -111,6 +117,9 @@ impl Server {
         let head = utils::http_parse(&content);
 
         if let Some(path) = head.get("path") {
+            if "/favicon.ico".eq(path) {
+                return Ok(());
+            }
             if authentication.eq(path) {
                 self.white_list
                     .write()
@@ -148,15 +157,53 @@ impl Server {
         })
         .to_string();
 
-        stream.write_all(value.as_bytes());
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n";
+        stream.write(response);
+        stream.write(value.as_bytes());
+        stream.flush();
         Ok(())
     }
 
-    pub fn handle_proxy(self: &Arc<Self>, _stream: TcpStream, _addr: &String) -> Result<()> {
-        todo!()
+    pub fn handle_proxy(
+        self: Arc<Self>,
+        mut stream: TcpStream,
+        mapping: Arc<Mapping>,
+    ) -> Result<()> {
+        if !mapping.is_public {
+            let remote_ip = stream.peer_addr()?.ip().to_string();
+
+            if !self.white_list.read().unwrap().contains_key(&remote_ip) {
+                self.add_black_list(&remote_ip, mapping.port);
+                std::thread::sleep(Duration::from_secs(5));
+                drop(stream);
+                return Ok(());
+            }
+        }
+
+        let mut target =
+            TcpStream::connect_timeout(&mapping.addr.parse()?, Duration::from_secs(5))?;
+
+        let mut stream_write = stream.try_clone()?;
+        let mut target_read = target.try_clone()?;
+
+        spawn(move || {
+            _ = std::io::copy(&mut stream, &mut target);
+        });
+
+        spawn(move || {
+            _ = std::io::copy(&mut target_read, &mut stream_write);
+        });
+
+        // if mapping.is_public{
+
+        // }
+        // let remote_ip = stream.peer_addr()?.ip().to_string();
+
+        Ok(())
     }
 
     pub fn add_black_list(self: &Arc<Self>, remote_ip: &String, port: u16) {
+        info!("add remote_ip :{} on port:{} to blacklist", remote_ip, port);
         let entry = self
             .black_list
             .write()

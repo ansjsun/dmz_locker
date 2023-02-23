@@ -2,14 +2,14 @@ mod domain;
 mod server;
 mod utils;
 
-
-
 use domain::Config;
-use log::error;
-
+use log::{error, info};
 
 fn main() {
+    std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
+
+    info!("start dmz_locker begin");
 
     let config_path = std::env::args()
         .nth(1)
