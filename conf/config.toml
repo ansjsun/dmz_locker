@@ -12,10 +12,5 @@ session_time_sec = 86400
 
 [[mappings]]
 port = 8888
-addr = "127.0.0.1:10000"
-is_public = true
-
-[[mappings]]
-port = 8888
-addr = "127.0.0.1:22"
+addr = "127.0.0.1:8888"
 is_public = false

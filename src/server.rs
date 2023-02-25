@@ -112,7 +112,8 @@ impl Server {
         let mut content = String::new();
         let mut reader = BufReader::new(stream.try_clone()?);
 
-        reader.read_to_string(&mut content)?;
+
+        _ = reader.read_to_string(&mut content);
 
         let head = utils::http_parse(&content);
 
