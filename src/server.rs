@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     io::{BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, Shutdown},
     sync::{atomic::Ordering, Arc, RwLock},
     thread::{spawn, JoinHandle},
     time::Duration,
@@ -173,6 +173,7 @@ impl Server {
         mut stream: TcpStream,
         mapping: Arc<Mapping>,
     ) -> Result<()> {
+
         let peer = stream.peer_addr()?;
         let remote_ip = peer.ip().to_string();
         let remote_port = peer.port();
@@ -194,13 +195,18 @@ impl Server {
         let mut handles = Vec::with_capacity(2);
         handles.push(spawn(move || {
             _ = std::io::copy(&mut stream, &mut target);
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            _ = target.shutdown(Shutdown::Both);
         }));
+
 
         handles.push(spawn(move || {
             _ = std::io::copy(&mut target_read, &mut stream_write);
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            _ = stream_write.shutdown(Shutdown::Both);
         }));
 
-        let key = format!("{}:{}", remote_ip, remote_port);
+        let key = format!("{}:{}->{:?}", remote_ip, remote_port,mapping.addr);
         _ = spawn(move || {
             self.conns
                 .write()
@@ -212,10 +218,6 @@ impl Server {
             self.conns.write().unwrap().remove(&key);
         });
 
-        // if mapping.is_public{
-
-        // }
-        // let remote_ip = stream.peer_addr()?.ip().to_string();
 
         Ok(())
     }
