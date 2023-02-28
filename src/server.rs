@@ -63,12 +63,16 @@ pub async fn start(conf: Config) -> Result<()> {
         let stream = listener.accept().await;
         match stream {
             Ok((stream, addr)) => {
-                if let Err(e) = server
-                    .handle_inner(&conf.authentication, stream, addr, conf.port)
-                    .await
-                {
-                    error!("handle interal hs error: {}", e);
-                }
+                let authentication = conf.authentication.clone();
+                let server = server.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = server
+                        .handle_inner(authentication, stream, addr, conf.port)
+                        .await
+                    {
+                        error!("handle interal hs error: {}", e);
+                    }
+                });
             }
             Err(e) => return Err(format!("listener on autho server recive error: {}", e).into()),
         }
@@ -110,16 +114,18 @@ impl Server {
 impl Server {
     async fn handle_inner(
         self: &Arc<Self>,
-        authentication: &String,
+        authentication: String,
         mut stream: TcpStream,
         addr: SocketAddr,
         port: u16,
     ) -> Result<()> {
+        let _ = stream.set_nodelay(false);
+
         let remote_ip = addr.ip().to_string();
 
         let mut buffer = [0u8; 512];
 
-        let n = timeout(Duration::from_secs(3), stream.read(&mut buffer)).await??;
+        let n = timeout(Duration::from_secs(30), stream.read(&mut buffer)).await??;
 
         let head = utils::http_parse(&String::from_utf8_lossy(&buffer[..n]));
 
@@ -128,6 +134,7 @@ impl Server {
                 return Ok(());
             }
             if authentication.eq(path) {
+                info!("success for ip :{} add to white list", remote_ip);
                 self.white_list
                     .write()
                     .unwrap()
