@@ -5,7 +5,8 @@ mod utils;
 use domain::Config;
 use log::{error, info};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
@@ -38,7 +39,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    if let Err(e) = server::start(config) {
+    if let Err(e) = server::start(config).await {
         error!("Error starting server: {}", e);
         std::process::exit(1);
     }

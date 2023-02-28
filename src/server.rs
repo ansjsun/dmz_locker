@@ -1,15 +1,19 @@
 use std::{
     collections::HashMap,
-    io::{BufReader, Read, Write},
-    net::{TcpListener, TcpStream, Shutdown},
+    net::SocketAddr,
     sync::{atomic::Ordering, Arc, RwLock},
-    thread::{spawn, JoinHandle},
     time::Duration,
     vec,
 };
 
 use log::{error, info};
 use moka::sync::Cache;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    time::timeout,
+    try_join,
+};
 
 use crate::{
     domain::{ClientInfo, Config, Mapping},
@@ -19,16 +23,14 @@ use crate::{
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 struct Server {
-    servers: RwLock<Vec<JoinHandle<()>>>,
     conns: RwLock<HashMap<String, u64>>,
     white_list: RwLock<Cache<String, u64>>,
     black_list: RwLock<Cache<String, ClientInfo>>,
     errors: Vec<String>,
 }
 
-pub fn start(conf: Config) -> Result<()> {
+pub async fn start(conf: Config) -> Result<()> {
     let server = Arc::new(Server {
-        servers: RwLock::new(Default::default()),
         conns: RwLock::new(Default::default()),
         white_list: RwLock::new(
             Cache::builder()
@@ -46,42 +48,50 @@ pub fn start(conf: Config) -> Result<()> {
     });
 
     for mapping in conf.mappings {
-        server.start_listener(mapping)?;
+        server.start_listener(mapping).await?;
     }
 
     if server.errors.len() > 0 {
         return Err(server.errors.join("\n").into());
     }
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", conf.port)).unwrap();
-    for stream in listener.incoming() {
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", conf.port))
+        .await
+        .unwrap();
+
+    loop {
+        let stream = listener.accept().await;
         match stream {
-            Ok(stream) => {
-                if let Err(e) = server.handle_inner(&conf.authentication, stream, conf.port) {
+            Ok((stream, addr)) => {
+                if let Err(e) = server
+                    .handle_inner(&conf.authentication, stream, addr, conf.port)
+                    .await
+                {
                     error!("handle interal hs error: {}", e);
                 }
             }
             Err(e) => return Err(format!("listener on autho server recive error: {}", e).into()),
         }
     }
-    Ok(())
 }
 
 impl Server {
-    fn start_listener(self: &Arc<Self>, mapping: Mapping) -> Result<()> {
+    async fn start_listener(self: &Arc<Self>, mapping: Mapping) -> Result<()> {
         info!("start proxy on :{:?} ", mapping);
         let mapping = Arc::new(mapping);
         let mp = mapping.clone();
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", mp.port))?;
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", mp.port)).await?;
+
         let server = self.clone();
-        self.servers.write().unwrap().push(spawn(move || {
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(stream) => {
+
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, addr)) => {
                         let mp = mapping.clone();
                         let server = server.clone();
-                        spawn(move || {
-                            if let Err(e) = server.handle_proxy(stream, mp) {
+                        tokio::spawn(async move {
+                            if let Err(e) = server.handle_proxy(stream, addr, mp).await {
                                 error!("stream for proxy server recive error: {:?}", e);
                             }
                         });
@@ -91,31 +101,27 @@ impl Server {
                     }
                 }
             }
-            error!("server proxyed on mapping:{:?} shutdownd", mp);
-        }));
+        });
 
         Ok(())
     }
 }
 
 impl Server {
-    fn handle_inner(
+    async fn handle_inner(
         self: &Arc<Self>,
         authentication: &String,
         mut stream: TcpStream,
+        addr: SocketAddr,
         port: u16,
     ) -> Result<()> {
-        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        let remote_ip = addr.ip().to_string();
 
-        let remote_ip = stream.peer_addr()?.ip().to_string();
+        let mut buffer = [0u8; 512];
 
-        let mut content = String::new();
-        let mut reader = BufReader::new(stream.try_clone()?);
+        let n = timeout(Duration::from_secs(3), stream.read(&mut buffer)).await??;
 
-
-        _ = reader.read_to_string(&mut content);
-
-        let head = utils::http_parse(&content);
+        let head = utils::http_parse(&String::from_utf8_lossy(&buffer[..n]));
 
         if let Some(path) = head.get("path") {
             if "/favicon.ico".eq(path) {
@@ -161,22 +167,31 @@ impl Server {
         })
         .to_string();
 
-        let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n";
-        stream.write(response)?;
-        stream.write(value.as_bytes())?;
-        stream.flush()?;
+        let response = format!(
+            r#"HTTP/1.1 200 OK
+Access-Control-Allow-Origin: *
+Content-Length: {}
+Cache-Control: no-cache
+Content-Type: application/json;charset=utf-8
+
+{}"#,
+            value.len(),
+            value
+        );
+
+        stream.write_all(response.as_bytes()).await?;
+        stream.flush().await?;
         Ok(())
     }
 
-    pub fn handle_proxy(
+    pub async fn handle_proxy(
         self: Arc<Self>,
         mut stream: TcpStream,
+        addr: SocketAddr,
         mapping: Arc<Mapping>,
     ) -> Result<()> {
-
-        let peer = stream.peer_addr()?;
-        let remote_ip = peer.ip().to_string();
-        let remote_port = peer.port();
+        let remote_ip = addr.ip().to_string();
+        let remote_port = addr.port();
         if !mapping.is_public {
             if !self.white_list.read().unwrap().contains_key(&remote_ip) {
                 self.add_black_list(&remote_ip, mapping.port);
@@ -186,38 +201,22 @@ impl Server {
             }
         }
 
-        let mut target =
-            TcpStream::connect_timeout(&mapping.addr.parse()?, Duration::from_secs(5))?;
+        let mut target = TcpStream::connect(mapping.addr.as_str()).await?;
 
-        let mut stream_write = stream.try_clone()?;
-        let mut target_read = target.try_clone()?;
+        let (mut ir, mut iw) = stream.split();
 
-        let mut handles = Vec::with_capacity(2);
-        handles.push(spawn(move || {
-            _ = std::io::copy(&mut stream, &mut target);
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            _ = target.shutdown(Shutdown::Both);
-        }));
+        let (mut sr, mut sw) = target.split();
 
+        let s1 = tokio::io::copy(&mut ir, &mut sw);
+        let s2 = tokio::io::copy(&mut sr, &mut iw);
 
-        handles.push(spawn(move || {
-            _ = std::io::copy(&mut target_read, &mut stream_write);
-            std::thread::sleep(std::time::Duration::from_secs(3));
-            _ = stream_write.shutdown(Shutdown::Both);
-        }));
-
-        let key = format!("{}:{}->{:?}", remote_ip, remote_port,mapping.addr);
-        _ = spawn(move || {
-            self.conns
-                .write()
-                .unwrap()
-                .insert(key.clone(), current_seconds());
-            for h in handles {
-                _ = h.join();
-            }
-            self.conns.write().unwrap().remove(&key);
-        });
-
+        let key = format!("{}:{}->{:?}", remote_ip, remote_port, mapping.addr);
+        self.conns
+            .write()
+            .unwrap()
+            .insert(key.clone(), current_seconds());
+        let _ = try_join!(s1, s2);
+        self.conns.write().unwrap().remove(&key);
 
         Ok(())
     }

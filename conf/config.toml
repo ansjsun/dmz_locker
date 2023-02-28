@@ -1,5 +1,5 @@
 # current server on port ， it port can not to mapping any host
-port = 9000
+port = 9567
 
 #  authentication https suffixes, the fomart is http://host:port/{authentication}
 authentication = "/ansjsun"
